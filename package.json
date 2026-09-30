@@ -1,0 +1,9 @@
+{
+  "name": "sub-region-set",
+  "version": "1.0.0",
+  "description": "Sub-region assignment scripts for NetSuite customers.",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/*.test.js"
+  }
+}
