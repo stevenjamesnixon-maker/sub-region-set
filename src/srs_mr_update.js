@@ -24,6 +24,13 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
 
         var PARAM_REPROCESS_ALL = 'custscript_srs_reprocess_all';
 
+        // Nightly pre-filter (reprocess-all unticked). A cheap superset of the rows map() may
+        // update; map() still applies the exact rule. A null stored postcode compares as
+        // not-equal, so it falls to ELSE 1 and the row is included.
+        // SANDBOX VERIFY: {billzipcode} / {shipzip} as formula field references on a customer search.
+        var CHANGED_FORMULA = 'formulanumeric: CASE WHEN {' + FIELD.POSTCODE + '} = {billzipcode}' +
+            ' OR {' + FIELD.POSTCODE + '} = {shipzip} THEN 0 ELSE 1 END';
+
         // Keys written from map and counted in summarize.
         var OUTCOME = {
             PROCESSED: 'processed',
@@ -59,6 +66,16 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
         function getInputData() {
             // All customers, active and inactive: no isinactive filter. Legacy saved searches
             // (6594, 10390, 7254) are deliberately not used.
+            // Reprocess-all: no filters. Otherwise only rows with no region, or whose stored
+            // postcode may differ from the current one.
+            var filters = [];
+            if (!isReprocessAll()) {
+                filters = [
+                    [FIELD.SUB_REGION, 'anyof', '@NONE@'],
+                    'OR',
+                    [CHANGED_FORMULA, 'equalto', '1']
+                ];
+            }
             var columns = [
                 'parent',
                 'billzipcode',
@@ -71,7 +88,7 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
             }
             return search.create({
                 type: search.Type.CUSTOMER,
-                filters: [],
+                filters: filters,
                 columns: columns
             });
         }
@@ -186,6 +203,7 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
             }
 
             counts.reprocessAll = isReprocessAll();
+            counts.inputMode = counts.reprocessAll ? 'all' : 'changed-only';
             log.audit('SRS_SUMMARY', counts);
         }
 
