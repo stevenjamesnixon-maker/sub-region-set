@@ -68,15 +68,6 @@ define(['N/log', 'N/runtime', './srs_region_map'], function (log, runtime, regio
                 return;
             }
 
-            if (!result.matched) {
-                log.audit('SRS_UNMATCHED', {
-                    recordId: rec.id,
-                    entityId: rec.getValue({ fieldId: 'entityid' }),
-                    postcode: postcode,
-                    prefix: result.prefix
-                });
-            }
-
             var currentRegion = String(rec.getValue({ fieldId: FIELD.SUB_REGION }) || '');
             var storedPostcode = String(rec.getValue({ fieldId: FIELD.POSTCODE }) || '');
             var engineerId = regionMap.getEngineer(result.regionId);
@@ -88,6 +79,16 @@ define(['N/log', 'N/runtime', './srs_region_map'], function (log, runtime, regio
 
             if (currentRegion === result.regionId && storedPostcode === postcode && !engineerChanged) {
                 return;
+            }
+
+            // Logged only when a write is about to happen, so repeat saves don't re-log.
+            if (!result.matched) {
+                log.audit('SRS_UNMATCHED', {
+                    recordId: rec.id,
+                    entityId: rec.getValue({ fieldId: 'entityid' }),
+                    postcode: postcode,
+                    prefix: result.prefix
+                });
             }
 
             rec.setValue({ fieldId: FIELD.SUB_REGION, value: result.regionId });
