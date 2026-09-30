@@ -2,16 +2,16 @@
 
 Sub-region assignment scripts for NetSuite customers. They set `custentity_sub_region` (custom list `customlist702`) on customer records from the postcode prefix.
 
-This README is the project context document. Version numbers are stated in the files themselves. If this table and a file disagree, the file is right.
+This README is the project context document. The version is recorded here and in `package.json`. If this document and a file disagree, the file is right.
 
 ## Components and versions
 
-Version: **1.0.0** (October 2026 remap, SuiteScript 2.1 rewrite)
+Version: **1.0.1** (October 2026 remap, SuiteScript 2.1 rewrite)
 
 | File | Type | Purpose |
 |---|---|---|
 | `src/srs_region_map.js` | Custom AMD module (no script record) | Prefix → region map, postcode normalisation, engineer config |
-| `src/srs_ue_customer.js` | User Event, Customer, `beforeSubmit` | Sets the sub-region on create/edit |
+| `src/srs_ue_customer.js` | User Event, Customer / Lead / Prospect, `beforeSubmit` | Sets the sub-region on create/edit |
 | `src/srs_mr_update.js` | Map/Reduce | Nightly catch-up and ad-hoc reprocess |
 | `data/postcode_prefix_mapping.csv` | Data | Canonical mapping (`Postcode Prefix,Sales Region`) |
 | `tests/region_map.test.js` | Node test | Unit tests for the module, including a CSV ↔ module comparison |
@@ -63,23 +63,33 @@ It records the postcode that the current region was computed from. The nightly r
 ## Deployment checklist (Sandbox first)
 
 1. Upload `srs_region_map.js` **first**, then `srs_ue_customer.js` and `srs_mr_update.js`, to the same folder.
-2. Create the User Event script record (`srs_ue_customer.js`) and a deployment on **Customer**.
+2. Create the User Event script record (`srs_ue_customer.js`) and three deployments: **Customer**, **Lead** and **Prospect**. Job is deliberately excluded (see Deliberate decisions).
 3. Create the Map/Reduce script record (`srs_mr_update.js`) with checkbox parameter `custscript_srs_reprocess_all`, and two deployments:
    - `customdeploy_srs_nightly`: scheduled daily, reprocess-all **unticked**
    - `customdeploy_srs_adhoc`: not scheduled, reprocess-all **ticked**
-4. Run the ad-hoc deployment once. This is the migration.
-   > ⚠ **Caution:** the legacy scheduled deployments (step 6) still write the old region values and the field sales rep if they run after the migration. Consider setting them to Not Scheduled before this step.
-5. Check the `SRS_SUMMARY` and `SRS_UNMATCHED` logs.
-6. Set the legacy deployments to Not Deployed:
+4. Set all legacy deployments to Not Deployed:
    - `customdeploy1`, `customdeploy2`, `customdeploy3` (`scheduledSubRegionUpdate`)
    - the legacy on-save deployment (`subRegion`)
+5. Run `customdeploy_srs_adhoc` once. This is the migration.
+6. Check the `SRS_SUMMARY` and `SRS_UNMATCHED` logs.
 7. Inactivate list values 8, 9, 14, 15 and 16 in `customlist702`.
+
+> Between steps 2 and 5, both the new UE and the legacy on-save script can run on a save. Do steps 2–5 together in one sitting.
 
 ## Behaviour
 
-**User Event (`beforeSubmit`, create and edit only).** Skipped for xedit, delete and other types, and when the execution context is Map/Reduce. Reads the postcode from the `addressbook` sublist's default billing line (no parent) or default shipping line (sub-customer), using the `addressbookaddress` subrecord `zip`. Writes when the region or the postcode differs from what's stored. Any error is logged as `SRS_ERROR` and never blocks the save.
+**User Event (`beforeSubmit`, create and edit only; deployed on Customer, Lead and Prospect).** Skipped for xedit, delete and other types, and when the execution context is Map/Reduce. Reads the postcode from the `addressbook` sublist's default billing line (no parent) or default shipping line (sub-customer), using the `addressbookaddress` subrecord `zip`. Writes when the region or the postcode differs from what's stored. Any error is logged as `SRS_ERROR` and never blocks the save.
 
-**Map/Reduce.** Searches all customers, active and inactive, with no saved search. For each customer:
+**Map/Reduce.** Searches customers (the Customer search type, which includes leads and prospects), active and inactive, with no saved search.
+
+Input depends on the reprocess-all parameter:
+- **Ticked (`inputMode: 'all'`):** no filters. Every customer reaches map.
+- **Unticked (`inputMode: 'changed-only'`):** a cheap pre-filter returns only customers that might need work. A customer is included when `custentity_sub_region` is empty (`anyof @NONE@`) **or** this formula equals 1:
+  `CASE WHEN {custentity_subregion_postcode} = {billzipcode} AND {custentity_subregion_postcode} = {shipzip} THEN 0 ELSE 1 END`
+  A customer is left out only when its stored postcode equals **both** its billing and shipping postcodes, so it can't matter which one the parent rule picks. A null stored postcode compares as not-equal, so it is included. The filter is a superset, and map still applies the exact rule below. The cost: every customer whose billing and shipping postcodes differ is included each night and then skipped in map, and so is every customer with no postcode and no stored postcode (counted as no-postcode).
+  *Sandbox check:* confirm that `{billzipcode}` and `{shipzip}` are accepted in the formula on a customer search.
+
+For each customer, map:
 - skips it when it has no postcode;
 - unless reprocess-all is ticked, skips it when the stored postcode equals the current postcode and a region is set;
 - otherwise computes the region and, if anything changes, calls `record.submitFields` with `ignoreMandatoryFields: true` and `enableSourcing: false`.
@@ -102,7 +112,7 @@ It records the postcode that the current region was computed from. The nightly r
 | Key | Level | Where | Meaning |
 |---|---|---|---|
 | `SRS_UNMATCHED` | audit | UE, MR map | Prefix not in the map; region set to Undefined (12). Logs the record ID and raw postcode. |
-| `SRS_SUMMARY` | audit | MR summarize | Counts: processed, updated, skipped-unchanged, no-postcode, unmatched, errors |
+| `SRS_SUMMARY` | audit | MR summarize | Counts: processed, updated, skipped-unchanged, no-postcode, unmatched, errors; plus `reprocessAll` and `inputMode` (`'changed-only'` or `'all'`) |
 | `SRS_ERROR` | error | UE, MR map and summarize | Any failure. The UE never blocks the save. |
 
 ## Deliberate decisions (so they aren't "fixed" later)
@@ -111,6 +121,7 @@ It records the postcode that the current region was computed from. The nightly r
 - **`Y0` → `YO` correction** before lookup.
 - **The parent rule is kept from the legacy script:** billing postcode for top-level customers, shipping postcode for sub-customers. A `parent` value equal to the record's own ID is treated as no parent.
 - **The field sales rep is deliberately not touched.** The legacy script set `custentity_field_sales_rep`; the new scripts don't read or write it.
+- **Job is deliberately excluded.** The legacy on-save script was deployed on Lead, Prospect, Customer and Job. The new UE is deployed on Customer, Lead and Prospect only (confirmed by Steve).
 - **The UE enforces the mapped region on every create/edit** where the region or postcode differs. The legacy on-save function only filled a blank region, so manual overrides of the sub-region no longer survive a save.
 
 ## Tests
