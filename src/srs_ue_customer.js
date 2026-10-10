@@ -6,6 +6,10 @@
  *   - no parent: default billing address
  *   - with a parent (sub-customer): default shipping address
  *
+ * Parameters (Free-Form Text, set per deployment; both empty = engineer off):
+ *   custscript_srs_pe_field  customer project engineer field ID
+ *   custscript_srs_pe_map    region:employee pairs, comma-separated
+ *
  * @NApiVersion 2.1
  * @NScriptType UserEventScript
  * @NModuleScope SameAccount
@@ -18,6 +22,27 @@ define(['N/log', 'N/runtime', './srs_region_map'], function (log, runtime, regio
         CHECK: 'custentity_subregion_check',
         POSTCODE: 'custentity_subregion_postcode'
     };
+
+    var PARAM = {
+        PE_FIELD: 'custscript_srs_pe_field',
+        PE_MAP: 'custscript_srs_pe_map'
+    };
+
+    /**
+     * Reads and parses the engineer parameters. Invalid config is logged and treated as off,
+     * so the region write still happens.
+     */
+    function readEngineerConfig() {
+        var script = runtime.getCurrentScript();
+        var config = regionMap.parseEngineerConfig(
+            script.getParameter({ name: PARAM.PE_FIELD }),
+            script.getParameter({ name: PARAM.PE_MAP })
+        );
+        if (config.status === 'invalid') {
+            log.error('SRS_CONFIG', { stage: 'beforeSubmit', reason: config.reason });
+        }
+        return config;
+    }
 
     /**
      * Top-level customers may report their own ID as parent; treat that as no parent.
@@ -70,10 +95,11 @@ define(['N/log', 'N/runtime', './srs_region_map'], function (log, runtime, regio
 
             var currentRegion = String(rec.getValue({ fieldId: FIELD.SUB_REGION }) || '');
             var storedPostcode = String(rec.getValue({ fieldId: FIELD.POSTCODE }) || '');
-            var engineerId = regionMap.getEngineer(result.regionId);
+            var config = readEngineerConfig();
+            var engineerId = regionMap.getEngineer(result.regionId, config);
             var engineerChanged = false;
             if (engineerId) {
-                var currentEngineer = String(rec.getValue({ fieldId: regionMap.ENGINEER_FIELD_ID }) || '');
+                var currentEngineer = String(rec.getValue({ fieldId: config.fieldId }) || '');
                 engineerChanged = currentEngineer !== engineerId;
             }
 
@@ -95,7 +121,7 @@ define(['N/log', 'N/runtime', './srs_region_map'], function (log, runtime, regio
             rec.setValue({ fieldId: FIELD.CHECK, value: true });
             rec.setValue({ fieldId: FIELD.POSTCODE, value: postcode });
             if (engineerId) {
-                rec.setValue({ fieldId: regionMap.ENGINEER_FIELD_ID, value: engineerId });
+                rec.setValue({ fieldId: config.fieldId, value: engineerId });
             }
         } catch (e) {
             // Never block the customer save.

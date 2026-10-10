@@ -1,6 +1,7 @@
 /**
  * srs_region_map.js
- * Shared postcode-prefix to sub-region mapping for customer records.
+ * Shared postcode-prefix to sub-region mapping for customer records, and parsing of the
+ * project engineer script parameters.
  *
  * No N/ module dependencies, so it can be unit-tested in plain Node.
  * Canonical copy of the mapping: data/postcode_prefix_mapping.csv. Keep the two in step;
@@ -57,16 +58,6 @@ define([], function () {
     addPrefixes(SOUTH_EAST_PREFIXES, REGION.SOUTH_EAST);
     addPrefixes(MID_NORTH_PREFIXES, REGION.MID_NORTH);
 
-    // Project engineer. Engineer writes are skipped until the field ID and all three
-    // active-region employee IDs are filled in (see isEngineerConfigured).
-    var ENGINEER_FIELD_ID = null; // TODO: confirm project engineer field ID on customer
-
-    var ENGINEER_BY_REGION = {};
-    ENGINEER_BY_REGION[REGION.SOUTH_WEST] = null; // Tracey Hillier. TODO: confirm employee internal ID
-    ENGINEER_BY_REGION[REGION.SOUTH_EAST] = null; // Tarquin Wagstaffe. TODO: confirm employee internal ID
-    ENGINEER_BY_REGION[REGION.MID_NORTH] = null; // Caroline Cornwell. TODO: confirm employee internal ID
-    ENGINEER_BY_REGION[REGION.UNDEFINED] = null; // No engineer for Undefined; stays null by design
-
     /**
      * Postcode area prefix: the leading one or two letters after normalising.
      * A leading Y0 (zero) is corrected to YO (letter O) before matching.
@@ -103,37 +94,82 @@ define([], function () {
     }
 
     /**
-     * True only when the engineer field and all three active-region employee IDs are set.
-     * Undefined (12) has no engineer and is not part of this check.
-     * @returns {boolean}
+     * Parses the project engineer script parameters. The values live in deployment
+     * parameters, never in this file.
+     *   fieldIdText  customer field ID for the project engineer
+     *   mapText      comma-separated region:employee pairs of internal IDs, e.g. '3:11,5:22'
+     * Regions with no pair (Undefined 12 included) have no engineer.
+     * @param {string} fieldIdText
+     * @param {string} mapText
+     * @returns {{status: string, fieldId: (string|undefined), byRegion: (Object|undefined), reason: (string|undefined)}}
+     *   status 'off' (both empty), 'ok' (valid) or 'invalid' (anything else, with a one-line reason)
      */
-    function isEngineerConfigured() {
-        return !!(ENGINEER_FIELD_ID &&
-            ENGINEER_BY_REGION[REGION.SOUTH_WEST] &&
-            ENGINEER_BY_REGION[REGION.SOUTH_EAST] &&
-            ENGINEER_BY_REGION[REGION.MID_NORTH]);
+    function parseEngineerConfig(fieldIdText, mapText) {
+        var fieldId = fieldIdText === null || fieldIdText === undefined ? '' : String(fieldIdText).trim();
+        var mapStr = mapText === null || mapText === undefined ? '' : String(mapText).trim();
+
+        if (!fieldId && !mapStr) {
+            return { status: 'off' };
+        }
+        if (!fieldId) {
+            return { status: 'invalid', reason: 'engineer map is set but engineer field ID is empty' };
+        }
+        if (!mapStr) {
+            return { status: 'invalid', reason: 'engineer field ID is set but engineer map is empty' };
+        }
+
+        fieldId = fieldId.toLowerCase();
+        if (!/^[a-z0-9_]+$/.test(fieldId)) {
+            return { status: 'invalid', reason: 'engineer field ID "' + fieldId + '" is not a valid field ID' };
+        }
+
+        var byRegion = {};
+        var pairs = mapStr.split(',');
+        for (var i = 0; i < pairs.length; i++) {
+            var pair = pairs[i].trim();
+            if (!pair) {
+                return { status: 'invalid', reason: 'engineer map has an empty pair at position ' + (i + 1) };
+            }
+            var sides = pair.split(':');
+            if (sides.length !== 2) {
+                return { status: 'invalid', reason: 'engineer map pair "' + pair + '" is not region:employee' };
+            }
+            var regionId = sides[0].trim();
+            var employeeId = sides[1].trim();
+            if (!/^[0-9]+$/.test(regionId) || !/^[0-9]+$/.test(employeeId)) {
+                return { status: 'invalid', reason: 'engineer map pair "' + pair + '" must be numeric on both sides' };
+            }
+            if (Object.prototype.hasOwnProperty.call(byRegion, regionId)) {
+                return { status: 'invalid', reason: 'engineer map pair "' + pair + '" repeats region ' + regionId };
+            }
+            byRegion[regionId] = employeeId;
+        }
+
+        return { status: 'ok', fieldId: fieldId, byRegion: byRegion };
     }
 
     /**
-     * @param {string} regionId
-     * @returns {(string|null)} employee internal ID, or null when unconfigured or no engineer for the region
+     * @param {(string|number)} regionId
+     * @param {Object} config result of parseEngineerConfig
+     * @returns {(string|null)} employee internal ID, or null when config is not 'ok' or the region has no entry
      */
-    function getEngineer(regionId) {
-        if (!isEngineerConfigured()) {
+    function getEngineer(regionId, config) {
+        if (!config || config.status !== 'ok') {
             return null;
         }
-        var id = ENGINEER_BY_REGION[String(regionId)];
-        return id ? String(id) : null;
+        var key = String(regionId);
+        if (!Object.prototype.hasOwnProperty.call(config.byRegion, key)) {
+            return null;
+        }
+        return config.byRegion[key];
     }
 
     return {
         REGION: REGION,
         PREFIX_TO_REGION: PREFIX_TO_REGION,
-        ENGINEER_FIELD_ID: ENGINEER_FIELD_ID,
-        ENGINEER_BY_REGION: ENGINEER_BY_REGION,
         getPrefix: getPrefix,
         getRegion: getRegion,
-        getEngineer: getEngineer,
-        isEngineerConfigured: isEngineerConfigured
+        parseEngineerConfig: parseEngineerConfig,
+        getEngineer: getEngineer
     };
 });

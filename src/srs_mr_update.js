@@ -6,7 +6,11 @@
  *   customdeploy_srs_nightly  scheduled daily, reprocess-all unticked (new or changed postcodes only)
  *   customdeploy_srs_adhoc    not scheduled, reprocess-all ticked (migration / after a map change)
  *
- * Parameter: custscript_srs_reprocess_all (checkbox)
+ * Parameters:
+ *   custscript_srs_reprocess_all  checkbox
+ *   custscript_srsmr_pe_field     Free-Form Text, customer project engineer field ID
+ *   custscript_srsmr_pe_map       Free-Form Text, region:employee pairs, comma-separated
+ *   Both engineer parameters empty = engineer off.
  *
  * @NApiVersion 2.1
  * @NScriptType MapReduceScript
@@ -23,6 +27,8 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
         };
 
         var PARAM_REPROCESS_ALL = 'custscript_srs_reprocess_all';
+        var PARAM_PE_FIELD = 'custscript_srsmr_pe_field';
+        var PARAM_PE_MAP = 'custscript_srsmr_pe_map';
 
         // Nightly pre-filter (reprocess-all unticked). A cheap superset of the rows map() may
         // update; map() still applies the exact rule. A null stored postcode compares as
@@ -51,6 +57,18 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
         }
 
         /**
+         * Parses the engineer parameters. Callers treat any status other than 'ok' as off.
+         * SRS_CONFIG is logged once, from getInputData, not per map invocation.
+         */
+        function getEngineerConfig() {
+            var script = runtime.getCurrentScript();
+            return regionMap.parseEngineerConfig(
+                script.getParameter({ name: PARAM_PE_FIELD }),
+                script.getParameter({ name: PARAM_PE_MAP })
+            );
+        }
+
+        /**
          * Search result values arrive as a string for text columns and as {value, text} for select columns.
          */
         function columnValue(values, name) {
@@ -68,6 +86,11 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
         }
 
         function getInputData() {
+            var config = getEngineerConfig();
+            if (config.status === 'invalid') {
+                log.error('SRS_CONFIG', { stage: 'getInputData', reason: config.reason });
+            }
+
             // All customers, active and inactive: no isinactive filter. Legacy saved searches
             // (6594, 10390, 7254) are deliberately not used.
             // Reprocess-all: no filters. Otherwise only rows with no region, or whose stored
@@ -87,8 +110,8 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
                 FIELD.SUB_REGION,
                 FIELD.POSTCODE
             ];
-            if (regionMap.isEngineerConfigured()) {
-                columns.push(regionMap.ENGINEER_FIELD_ID);
+            if (config.status === 'ok') {
+                columns.push(config.fieldId);
             }
             return search.create({
                 type: search.Type.CUSTOMER,
@@ -136,9 +159,10 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
                 log.audit('SRS_UNMATCHED', { recordId: id, postcode: postcode, prefix: region.prefix });
             }
 
-            var engineerId = regionMap.getEngineer(region.regionId);
+            var config = getEngineerConfig();
+            var engineerId = regionMap.getEngineer(region.regionId, config);
             var engineerChanged = !!engineerId &&
-                columnValue(values, regionMap.ENGINEER_FIELD_ID) !== engineerId;
+                columnValue(values, config.fieldId) !== engineerId;
 
             if (currentRegion === region.regionId && storedPostcode === postcode && !engineerChanged) {
                 context.write({ key: OUTCOME.SKIPPED_UNCHANGED, value: id });
@@ -150,7 +174,7 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
             fields[FIELD.CHECK] = true;
             fields[FIELD.POSTCODE] = postcode;
             if (engineerId) {
-                fields[regionMap.ENGINEER_FIELD_ID] = engineerId;
+                fields[config.fieldId] = engineerId;
             }
 
             try {
@@ -208,6 +232,8 @@ define(['N/log', 'N/record', 'N/runtime', 'N/search', './srs_region_map'],
 
             counts.reprocessAll = isReprocessAll();
             counts.inputMode = counts.reprocessAll ? 'all' : 'changed-only';
+            var engineerStatus = getEngineerConfig().status;
+            counts.engineer = engineerStatus === 'ok' ? 'on' : engineerStatus; // 'on' | 'off' | 'invalid'
             log.audit('SRS_SUMMARY', counts);
         }
 

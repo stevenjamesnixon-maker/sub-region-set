@@ -99,9 +99,55 @@ test('9. JS map matches data/postcode_prefix_mapping.csv exactly', function () {
     assert.strictEqual(prefixes.length, 126);
 });
 
-test('10. getEngineer returns null while unconfigured', function () {
-    assert.strictEqual(map.isEngineerConfigured(), false);
-    [R.SOUTH_WEST, R.SOUTH_EAST, R.MID_NORTH, R.UNDEFINED, null, 'x'].forEach(function (id) {
-        assert.strictEqual(map.getEngineer(id), null);
+test('10. engineer config: both empty is off', function () {
+    [['', ''], ['  ', ' '], [null, undefined]].forEach(function (args) {
+        var config = map.parseEngineerConfig(args[0], args[1]);
+        assert.deepStrictEqual(config, { status: 'off' }, JSON.stringify(args));
+        assert.strictEqual(map.getEngineer(R.SOUTH_EAST, config), null);
     });
+});
+
+test('11. engineer config: valid map', function () {
+    ['3:1,5:2,17:3', ' 3 : 1 , 5:2 ,17: 3 '].forEach(function (mapText) {
+        var config = map.parseEngineerConfig(' custentity_test_engineer ', mapText);
+        assert.strictEqual(config.status, 'ok', mapText);
+        assert.strictEqual(config.fieldId, 'custentity_test_engineer');
+        assert.deepStrictEqual(config.byRegion, { '3': '1', '5': '2', '17': '3' });
+        assert.strictEqual(Object.keys(config.byRegion).length, 3);
+        assert.strictEqual(map.getEngineer('5', config), '2');
+        assert.strictEqual(map.getEngineer('12', config), null);
+        assert.strictEqual(map.getEngineer(5, config), '2');
+    });
+    // One pair is enough; field ID is lowercased.
+    var one = map.parseEngineerConfig('CUSTENTITY_X', '3:1');
+    assert.strictEqual(one.status, 'ok');
+    assert.strictEqual(one.fieldId, 'custentity_x');
+    assert.strictEqual(map.getEngineer('5', one), null);
+});
+
+test('12. engineer config: invalid input', function () {
+    var cases = [
+        ['custentity_x', ''],
+        ['', '3:1'],
+        ['custentity_x', '3:1,5'],
+        ['custentity_x', '3:abc'],
+        ['custentity_x', '3:1,,5:2'],
+        ['custentity_x', '3:1,3:2'],
+        ['custentity bad', '3:1']
+    ];
+    cases.forEach(function (args) {
+        var config = map.parseEngineerConfig(args[0], args[1]);
+        assert.strictEqual(config.status, 'invalid', JSON.stringify(args));
+        assert.ok(typeof config.reason === 'string' && config.reason.length > 0, JSON.stringify(args));
+        assert.strictEqual(map.getEngineer('3', config), null);
+    });
+});
+
+test('13. module loads with no N/ modules', function () {
+    var deps;
+    var source = fs.readFileSync(path.join(root, 'src', 'srs_region_map.js'), 'utf8');
+    new Function('define', source)(function (d) { deps = d; });
+    assert.deepStrictEqual(deps, []);
+    assert.strictEqual(typeof map.parseEngineerConfig, 'function');
+    assert.strictEqual(typeof map.getEngineer, 'function');
 });
