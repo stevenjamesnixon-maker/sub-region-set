@@ -6,11 +6,11 @@ This README is the project context document. The version is recorded here and in
 
 ## Components and versions
 
-Version: **1.0.1** (October 2026 remap, SuiteScript 2.1 rewrite)
+Version: **1.1.0** (October 2026 remap, SuiteScript 2.1 rewrite; project engineer from script parameters)
 
 | File | Type | Purpose |
 |---|---|---|
-| `src/srs_region_map.js` | Custom AMD module (no script record) | Prefix → region map, postcode normalisation, engineer config |
+| `src/srs_region_map.js` | Custom AMD module (no script record) | Prefix → region map, postcode normalisation, engineer config parsing |
 | `src/srs_ue_customer.js` | User Event, Customer / Lead / Prospect, `beforeSubmit` | Sets the sub-region on create/edit |
 | `src/srs_mr_update.js` | Map/Reduce | Nightly catch-up and ad-hoc reprocess |
 | `data/postcode_prefix_mapping.csv` | Data | Canonical mapping (`Postcode Prefix,Sales Region`) |
@@ -60,6 +60,25 @@ Create the custom entity field `custentity_subregion_postcode`:
 
 It records the postcode that the current region was computed from. The nightly run uses it to find new or changed records.
 
+## Parameters
+
+Project engineer configuration lives in script deployment parameters, never in the code. All four are **Free-Form Text**, no default, Preference *Deployment*. Script parameter IDs are unique across the account, so the UE and MR use different IDs.
+
+| Script | Parameter | Holds |
+|---|---|---|
+| User Event | `custscript_srs_pe_field` | Customer field ID of the project engineer (lowercase letters, digits, underscores) |
+| User Event | `custscript_srs_pe_map` | Region-to-employee pairs: `3:<employee>,5:<employee>,17:<employee>` |
+| Map/Reduce | `custscript_srsmr_pe_field` | Same as `custscript_srs_pe_field` |
+| Map/Reduce | `custscript_srsmr_pe_map` | Same as `custscript_srs_pe_map` |
+
+Map format: comma-separated `region:employee` pairs of internal IDs (`customlist702` value : employee). Whitespace is tolerated. A region with no pair, Undefined (12) included, gets no engineer; a single pair is valid.
+
+- **Both empty** = engineer off.
+- **Half-set** (one empty, the other not) **or malformed** (pair not `region:employee`, non-numeric side, empty pair, repeated region, invalid field ID) = `SRS_CONFIG` error and engineer off.
+- **The region write is never blocked** by engineer configuration.
+
+The MR checkbox `custscript_srs_reprocess_all` is unchanged.
+
 ## Deployment checklist (Sandbox first)
 
 1. Upload `srs_region_map.js` **first**, then `srs_ue_customer.js` and `srs_mr_update.js`, to the same folder.
@@ -73,12 +92,14 @@ It records the postcode that the current region was computed from. The nightly r
 5. Run `customdeploy_srs_adhoc` once. This is the migration.
 6. Check the `SRS_SUMMARY` and `SRS_UNMATCHED` logs.
 7. Inactivate list values 8, 9, 14, 15 and 16 in `customlist702`.
+8. Create the four engineer parameters (see Parameters) and set them on every deployment (three UE, two MR).
+9. After setting them, run the ad-hoc deployment (`customdeploy_srs_adhoc`) once to backfill engineers. Check `SRS_SUMMARY` shows `engineer: 'on'`.
 
 > Between steps 2 and 5, both the new UE and the legacy on-save script can run on a save. Do steps 2–5 together in one sitting.
 
 ## Behaviour
 
-**User Event (`beforeSubmit`, create and edit only; deployed on Customer, Lead and Prospect).** Skipped for xedit, delete and other types, and when the execution context is Map/Reduce. Reads the postcode from the `addressbook` sublist's default billing line (no parent) or default shipping line (sub-customer), using the `addressbookaddress` subrecord `zip`. Writes when the region or the postcode differs from what's stored. Any error is logged as `SRS_ERROR` and never blocks the save.
+**User Event (`beforeSubmit`, create and edit only; deployed on Customer, Lead and Prospect).** Skipped for xedit, delete and other types, and when the execution context is Map/Reduce. Reads the postcode from the `addressbook` sublist's default billing line (no parent) or default shipping line (sub-customer), using the `addressbookaddress` subrecord `zip`. Writes when the region, the postcode or (when configured) the engineer differs from what's stored. Any error is logged as `SRS_ERROR` and never blocks the save.
 
 **Map/Reduce.** Searches customers (the Customer search type, which includes leads and prospects), active and inactive, with no saved search.
 
@@ -89,30 +110,30 @@ Input depends on the reprocess-all parameter:
   A customer is left out only when its stored postcode equals **both** its billing and shipping postcodes, so it can't matter which one the parent rule picks. A null stored postcode compares as not-equal, so it is included. The filter is a superset, and map still applies the exact rule below. The cost: every customer whose billing and shipping postcodes differ is included each night and then skipped in map, and so is every customer with no postcode and no stored postcode (counted as no-postcode).
   *Sandbox check:* confirm that `{billzipcode}` and `{shipzip}` are accepted in the formula on a customer search.
 
+The engineer column is added to the search only when the engineer config is valid. An invalid config is logged as `SRS_CONFIG` once, in `getInputData`, not per record.
+
 For each customer, map:
 - skips it when it has no postcode;
 - unless reprocess-all is ticked, skips it when the stored postcode equals the current postcode and a region is set;
-- otherwise computes the region and, if anything changes, calls `record.submitFields` with `ignoreMandatoryFields: true` and `enableSourcing: false`.
+- otherwise computes the region and engineer and, if anything changes (region, postcode or engineer), calls `record.submitFields` with `ignoreMandatoryFields: true` and `enableSourcing: false`.
 
 **Fields written** (by both scripts):
 - `custentity_sub_region`
 - `custentity_subregion_check = true`
 - `custentity_subregion_postcode`
-- the project engineer, once configured
+- the project engineer field named in the parameters, when the engineer config is valid and the region has a pair in the map
 
 ## Open items
 
-- The project engineer field ID on customer (`ENGINEER_FIELD_ID`).
-- The three employee internal IDs: Tracey Hillier (South West), Tarquin Wagstaffe (South East), Caroline Cornwell (Mid & North).
-- Engineer writes stay off until the field ID and all three employee IDs are set. Customers in Undefined (12) have no engineer, so their engineer field is left untouched.
-- Whether the engineer should overwrite an existing value. The current code overwrites it whenever the region is written.
+- None for the engineer. Brief 03 (a redesign of the stored-postcode / nightly pre-filter approach) was withdrawn on 10 Oct 2026 after the v1.0.1 migration completed in Production; the v1.0.1 design stays.
 
 ## Audit log keys
 
 | Key | Level | Where | Meaning |
 |---|---|---|---|
 | `SRS_UNMATCHED` | audit | UE, MR map | Prefix not in the map; region set to Undefined (12). Logs the record ID and raw postcode. |
-| `SRS_SUMMARY` | audit | MR summarize | Counts: processed, updated, skipped-unchanged, no-postcode, unmatched, errors; plus `reprocessAll` and `inputMode` (`'changed-only'` or `'all'`) |
+| `SRS_SUMMARY` | audit | MR summarize | Counts: processed, updated, skipped-unchanged, no-postcode, unmatched, errors; plus `reprocessAll`, `inputMode` (`'changed-only'` or `'all'`) and `engineer` (`'on'`, `'off'` or `'invalid'`) |
+| `SRS_CONFIG` | error | UE `beforeSubmit`, MR `getInputData` | A half-set or malformed engineer parameter. Logs the reason; the engineer is off and the region is still written. |
 | `SRS_ERROR` | error | UE, MR map and summarize | Any failure. The UE never blocks the save. |
 
 ## Deliberate decisions (so they aren't "fixed" later)
@@ -123,6 +144,10 @@ For each customer, map:
 - **The field sales rep is deliberately not touched.** The legacy script set `custentity_field_sales_rep`; the new scripts don't read or write it.
 - **Job is deliberately excluded.** The legacy on-save script was deployed on Lead, Prospect, Customer and Job. The new UE is deployed on Customer, Lead and Prospect only (confirmed by Steve).
 - **The UE enforces the mapped region on every create/edit** where the region or postcode differs. The legacy on-save function only filled a blank region, so manual overrides of the sub-region no longer survive a save.
+- **The engineer is enforced on every write**, not filled once. A different engineer alone is enough to trigger a write, so a hand-set engineer on a customer is reverted on the next save or ad-hoc run. Exceptions belong on the opportunity's `custbody_pe`.
+- **A customer that moves to Undefined keeps its last engineer.** Undefined has no pair in the map, and nothing clears the field.
+- **The nightly run does not backfill engineers** on unchanged customers. The nightly skip rule (stored postcode equals current postcode and a region is set) runs before the engineer check, and the pre-filter leaves those customers out anyway. The ad-hoc reprocess-all run backfills them, and so does the UE on the next save.
+- **Opportunities inherit at creation only.** `custbody_pe` defaults from the customer's project engineer field when the opportunity is created; existing opportunities are untouched.
 
 ## Tests
 
